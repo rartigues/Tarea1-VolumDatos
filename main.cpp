@@ -11,6 +11,7 @@
 #include <chrono>
 #include <iomanip>
 #include <numeric>
+#include <cstring>
 #include "MurmurHash3.h"
 
 class HyperLogLog {
@@ -145,30 +146,18 @@ double calculate_true_jaccard(const std::vector<std::string>& set1, const std::v
     return static_cast<double>(intersection_size) / union_size;
 }
 
-struct EvaluationResults {
-    double ERM;
-    double EAM;
+struct ExperimentResult {
+    int k, w, b;
+    double true_jaccard;
+    double estimated_jaccard_kmers;
+    double estimated_jaccard_minimizers;
+    double time_kmers;
+    double time_minimizers;
+    double erm_kmers;
+    double eam_kmers;
+    double erm_minimizers;
+    double eam_minimizers;
 };
-
-EvaluationResults calculate_errors(const std::vector<double>& true_values, const std::vector<double>& estimated_values) {
-    double sum_relative_error = 0.0;
-    double sum_absolute_error = 0.0;
-    int valid_comparisons = 0;
-
-    for (size_t i = 0; i < true_values.size(); ++i) {
-        if (true_values[i] > 0) {
-            sum_relative_error += std::abs(estimated_values[i] - true_values[i]) / true_values[i];
-            valid_comparisons++;
-        }
-        sum_absolute_error += std::abs(estimated_values[i] - true_values[i]);
-    }
-
-    EvaluationResults results;
-    results.ERM = valid_comparisons > 0 ? sum_relative_error / valid_comparisons : 0;
-    results.EAM = sum_absolute_error / true_values.size();
-
-    return results;
-}
 
 std::string read_first_genome(const std::string& filename) {
     std::ifstream file(filename);
@@ -198,7 +187,39 @@ std::string read_first_genome(const std::string& filename) {
     return genome;
 }
 
-int main() {
+void write_csv_header(std::ofstream& file) {
+    file << "k,w,b,true_jaccard,estimated_jaccard_kmers,estimated_jaccard_minimizers,"
+         << "time_kmers,time_minimizers,erm_kmers,eam_kmers,erm_minimizers,eam_minimizers\n";
+}
+
+void write_csv_row(std::ofstream& file, const ExperimentResult& result) {
+    file << result.k << "," << result.w << "," << result.b << ","
+         << result.true_jaccard << "," << result.estimated_jaccard_kmers << ","
+         << result.estimated_jaccard_minimizers << "," << result.time_kmers << ","
+         << result.time_minimizers << "," << result.erm_kmers << ","
+         << result.eam_kmers << "," << result.erm_minimizers << ","
+         << result.eam_minimizers << "\n";
+}
+
+int main(int argc, char* argv[]) {
+    bool generate_log = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--log") == 0) {
+            generate_log = true;
+            break;
+        }
+    }
+
+    std::ofstream log_file;
+    if (generate_log) {
+        log_file.open("experiment_results.csv");
+        if (!log_file.is_open()) {
+            std::cerr << "Error: Unable to create log file." << std::endl;
+            return 1;
+        }
+        write_csv_header(log_file);
+    }
+
     std::vector<std::string> genome_files = {
         "instances/GCF_000331305.1_ASM33130v1_genomic.fna",
         "instances/GCF_000373685.1_ASM37368v1_genomic.fna",
@@ -223,67 +244,138 @@ int main() {
     std::vector<int> w_values = {50, 100};
     std::vector<int> b_values = {10, 14};  // 2^10 = 1024, 2^14 = 16384 registros
 
+    std::vector<ExperimentResult> all_results;
+
     for (int k : k_values) {
         for (int w : w_values) {
             for (int b : b_values) {
                 std::cout << "\nEvaluating with k=" << k << ", w=" << w << ", b=" << b << std::endl;
                 std::cout << "----------------------------------------" << std::endl;
 
-                std::vector<double> true_jaccards, estimated_jaccards_kmers, estimated_jaccards_minimizers;
-                std::vector<double> kmer_times, minimizer_times;
-
                 for (size_t i = 0; i < genomes.size(); ++i) {
                     for (size_t j = i + 1; j < genomes.size(); ++j) {
                         std::cout << "Processing genomes " << i+1 << " and " << j+1 << std::endl;
 
+                        ExperimentResult result;
+                        result.k = k;
+                        result.w = w;
+                        result.b = b;
+
                         // K-mers approach
                         auto start = std::chrono::high_resolution_clock::now();
-                        double jaccard_kmers = jaccard_similarity_kmers(genomes[i], genomes[j], k, b);
+                        result.estimated_jaccard_kmers = jaccard_similarity_kmers(genomes[i], genomes[j], k, b);
                         auto end = std::chrono::high_resolution_clock::now();
-                        std::chrono::duration<double> diff = end - start;
-                        kmer_times.push_back(diff.count());
+                        result.time_kmers = std::chrono::duration<double>(end - start).count();
 
                         // Minimizers approach
                         start = std::chrono::high_resolution_clock::now();
-                        double jaccard_minimizers = jaccard_similarity_minimizers(genomes[i], genomes[j], k, w, b);
+                        result.estimated_jaccard_minimizers = jaccard_similarity_minimizers(genomes[i], genomes[j], k, w, b);
                         end = std::chrono::high_resolution_clock::now();
-                        diff = end - start;
-                        minimizer_times.push_back(diff.count());
+                        result.time_minimizers = std::chrono::duration<double>(end - start).count();
 
-                        // Calculate true Jaccard (using k-mers for simplicity)
+                        // Calculate true Jaccard
                         auto kmers1 = generate_kmers(genomes[i], k);
                         auto kmers2 = generate_kmers(genomes[j], k);
-                        double true_jaccard = calculate_true_jaccard(kmers1, kmers2);
+                        result.true_jaccard = calculate_true_jaccard(kmers1, kmers2);
 
-                        true_jaccards.push_back(true_jaccard);
-                        estimated_jaccards_kmers.push_back(jaccard_kmers);
-                        estimated_jaccards_minimizers.push_back(jaccard_minimizers);
+                        // Calculate ERM and EAM
+                        if (result.true_jaccard == 0) {
+                            // Si true_jaccard es 0, usamos el valor estimado como error
+                            result.erm_kmers = result.estimated_jaccard_kmers;
+                            result.erm_minimizers = result.estimated_jaccard_minimizers;
+                        } else {
+                            result.erm_kmers = std::abs(result.estimated_jaccard_kmers - result.true_jaccard) / result.true_jaccard;
+                            result.erm_minimizers = std::abs(result.estimated_jaccard_minimizers - result.true_jaccard) / result.true_jaccard;
+                        }
+                        result.eam_kmers = std::abs(result.estimated_jaccard_kmers - result.true_jaccard);
+                        result.eam_minimizers = std::abs(result.estimated_jaccard_minimizers - result.true_jaccard);
 
-                        std::cout << "  True Jaccard: " << true_jaccard << std::endl;
-                        std::cout << "  K-mers Estimated: " << jaccard_kmers << ", Time: " << kmer_times.back() << " seconds" << std::endl;
-                        std::cout << "  Minimizers Estimated: " << jaccard_minimizers << ", Time: " << minimizer_times.back() << " seconds" << std::endl;
+                        all_results.push_back(result);
+
+                        if (generate_log) {
+                            write_csv_row(log_file, result);
+                        }
+
+                        std::cout << "  True Jaccard: " << result.true_jaccard << std::endl;
+                        std::cout << "  K-mers Estimated: " << result.estimated_jaccard_kmers 
+                                  << ", Time: " << result.time_kmers << " seconds" << std::endl;
+                        std::cout << "  Minimizers Estimated: " << result.estimated_jaccard_minimizers 
+                                  << ", Time: " << result.time_minimizers << " seconds" << std::endl;
                     }
                 }
 
-                // Calculate errors
-                auto errors_kmers = calculate_errors(true_jaccards, estimated_jaccards_kmers);
-                auto errors_minimizers = calculate_errors(true_jaccards, estimated_jaccards_minimizers);
+                // Calculate and display ERM and EAM for this configuration
+                double erm_kmers = 0, eam_kmers = 0, erm_minimizers = 0, eam_minimizers = 0;
+                int valid_comparisons = 0;
+                for (const auto& result : all_results) {
+                    if (result.k == k && result.w == w && result.b == b) {
+                        erm_kmers += result.erm_kmers;
+                        eam_kmers += result.eam_kmers;
+                        erm_minimizers += result.erm_minimizers;
+                        eam_minimizers += result.eam_minimizers;
+                        valid_comparisons++;
+                    }
+                }
 
-                double avg_kmer_time = std::accumulate(kmer_times.begin(), kmer_times.end(), 0.0) / kmer_times.size();
-                double avg_minimizer_time = std::accumulate(minimizer_times.begin(), minimizer_times.end(), 0.0) / minimizer_times.size();
+                if (valid_comparisons > 0) {
+                    erm_kmers /= valid_comparisons;
+                    eam_kmers /= valid_comparisons;
+                    erm_minimizers /= valid_comparisons;
+                    eam_minimizers /= valid_comparisons;
+                }
 
                 std::cout << std::fixed << std::setprecision(6);
                 std::cout << "K-mers results:" << std::endl;
-                std::cout << "  Error Relativo Medio (ERM): " << errors_kmers.ERM << std::endl;
-                std::cout << "  Error Absoluto Medio (EAM): " << errors_kmers.EAM << std::endl;
-                std::cout << "  Average processing time: " << avg_kmer_time << " seconds" << std::endl;
+                std::cout << "  Error Relativo Medio (ERM): " << erm_kmers << std::endl;
+                std::cout << "  Error Absoluto Medio (EAM): " << eam_kmers << std::endl;
 
                 std::cout << "Minimizers results:" << std::endl;
-                std::cout << "  Error Relativo Medio (ERM): " << errors_minimizers.ERM << std::endl;
-                std::cout << "  Error Absoluto Medio (EAM): " << errors_minimizers.EAM << std::endl;
-                std::cout << "  Average processing time: " << avg_minimizer_time << " seconds" << std::endl;
+                std::cout << "  Error Relativo Medio (ERM): " << erm_minimizers << std::endl;
+                std::cout << "  Error Absoluto Medio (EAM): " << eam_minimizers << std::endl;
             }
         }
+    }
+
+    if (generate_log) {
+        // Calcular y escribir estadísticas globales al final del archivo CSV
+        double avg_true_jaccard = 0, min_true_jaccard = std::numeric_limits<double>::max(), max_true_jaccard = 0;
+        double avg_erm_kmers = 0, avg_eam_kmers = 0, avg_erm_minimizers = 0, avg_eam_minimizers = 0;
+        double avg_time_kmers = 0, avg_time_minimizers = 0;
+        
+        for (const auto& result : all_results) {
+            avg_true_jaccard += result.true_jaccard;
+            min_true_jaccard = std::min(min_true_jaccard, result.true_jaccard);
+            max_true_jaccard = std::max(max_true_jaccard, result.true_jaccard);
+            avg_erm_kmers += result.erm_kmers;
+            avg_eam_kmers += result.eam_kmers;
+            avg_erm_minimizers += result.erm_minimizers;
+            avg_eam_minimizers += result.eam_minimizers;
+            avg_time_kmers += result.time_kmers;
+            avg_time_minimizers += result.time_minimizers;
+        }
+        
+        int n = all_results.size();
+        avg_true_jaccard /= n;
+        avg_erm_kmers /= n;
+        avg_eam_kmers /= n;
+        avg_erm_minimizers /= n;
+        avg_eam_minimizers /= n;
+        avg_time_kmers /= n;
+        avg_time_minimizers /= n;
+        
+        log_file << "\nGlobal Statistics\n";
+        log_file << "Average True Jaccard," << avg_true_jaccard << "\n";
+        log_file << "Min True Jaccard," << min_true_jaccard << "\n";
+        log_file << "Max True Jaccard," << max_true_jaccard << "\n";
+        log_file << "Average ERM K-mers," << avg_erm_kmers << "\n";
+        log_file << "Average EAM K-mers," << avg_eam_kmers << "\n";
+        log_file << "Average ERM Minimizers," << avg_erm_minimizers << "\n";
+        log_file << "Average EAM Minimizers," << avg_eam_minimizers << "\n";
+        log_file << "Average Time K-mers," << avg_time_kmers << "\n";
+        log_file << "Average Time Minimizers," << avg_time_minimizers << "\n";
+
+        log_file.close();
+        std::cout << "\nExperiment results have been written to experiment_results.csv" << std::endl;
     }
 
     return 0;
